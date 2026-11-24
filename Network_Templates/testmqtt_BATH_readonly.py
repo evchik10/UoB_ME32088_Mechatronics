@@ -15,8 +15,8 @@ logging.basicConfig(level=logging.INFO)
 def on_connect(client,userdata,flags,rc,properties):
     logging.info("Connected with result code %s", rc)
     #client.subscribe("$SYS/#")
-    client.subscribe("TeamTopic")
-    logging.info("Subscribed to TeamTopic")
+    client.subscribe("HEHE")
+    logging.info("Subscribed to HEHE")
 
 # The callback for when a PUBLISH message is received from the server.
 def on_message(client, userdata, msg):
@@ -26,8 +26,8 @@ client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2) # VERSION2 is the callbac
 client.on_connect = on_connect
 client.on_message = on_message
 
-client.username_pw_set(***USERNAME***,password=***PASSWORD***)
-client.connect(***SERVER***,***PORT***,60)
+client.username_pw_set('student',password='HousekeepingGlintsStreetwise')
+client.connect('138.38.11.141',31415,60)
 
 # Blocking call that processes network traffic, dispatches callbacks and
 # handles reconnecting.

@@ -6,7 +6,7 @@ It requires OpenCV 4.7 or newer, including OpenCV 5, and uses ArucoDetector and 
 
 @author: ioannisgeorgilas
 """
-
+from pathlib import Path
 import cv2
 import cv2.aruco as aruco
 import logging
@@ -16,7 +16,9 @@ import time # We will use this to ensure a steady processing rate
 logging.basicConfig(level=logging.INFO)
 
 # Load the camera calibration values
-camera_calibration = np.load('Sample_Calibration.npz')
+script_folder = Path(__file__).resolve().parent
+calibration_path = script_folder / "Sample_Calibration.npz"
+camera_calibration = np.load(calibration_path)
 CM=camera_calibration['CM'] #camera matrix
 dist_coef=camera_calibration['dist_coef']# distortion coefficients from the camera
 logging.info("Loaded camera calibration from Sample_Calibration.npz")
@@ -75,18 +77,45 @@ while True:
             logging.info("No ArUco markers detected")
         last_logged_marker_ids = marker_ids
 
+        
+
     # If markers are detected
     # (when nothing is detected ids is None in OpenCV 4 but an empty array in OpenCV 5, so we check the corners)
+    
     if len(corners) > 0:
         # Draw detected markers
         frame = aruco.drawDetectedMarkers(frame, corners, ids)
 
-        # Estimate the pose of each marker from its 4 detected corners
-        for i in range(len(corners)):
-            ok, rvec, tvec = cv2.solvePnP(marker_points, corners[i], CM, dist_coef, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+        # Process each detected marker
+        for i, marker_id in enumerate(ids.flatten()):
+
+            # Estimate marker pose
+            ok, rvec, tvec = cv2.solvePnP(
+                marker_points,
+                corners[i],
+                CM,
+                dist_coef,
+                flags=cv2.SOLVEPNP_IPPE_SQUARE
+            )
+
             if ok:
-                # Draw axis for each marker (axis length 10 mm)
-                frame = cv2.drawFrameAxes(frame, CM, dist_coef, rvec, tvec, 10)
+                # Draw axis for each marker
+                frame = cv2.drawFrameAxes(
+                    frame, CM, dist_coef, rvec, tvec, 10
+                )
+
+                # Get X, Y, Z coordinates
+                x = tvec[0][0]
+                y = tvec[1][0]
+                z = tvec[2][0]
+
+                # Print marker information
+                print(f"Marker ID: {int(marker_id)}")
+                print(f"X: {x:.2f} mm")
+                print(f"Y: {y:.2f} mm")
+                print(f"Z: {z:.2f} mm")
+                print("--------------------")
+
 
     # Add the frame rate to the image
     cv2.putText(frame, f"CAMERA FPS: {fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)

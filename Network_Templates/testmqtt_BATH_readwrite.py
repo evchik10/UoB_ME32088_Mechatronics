@@ -35,13 +35,13 @@ client.on_connect = on_connect
 client.on_message = on_message
 
 # Set the username and password
-client.username_pw_set(***USERNAME***,password=***PASSWORD***)
+client.username_pw_set('student',password='HousekeepingGlintsStreetwise')
 
 # Connect to the server using a specific port with a timeout delay (in seconds)
-client.connect(***SERVER***,***PORT***,60)
+client.connect('138.38.11.141',31415,60)
 
 # Create your main topic string. The subtopics are numbers, e.g. TeamTopic/1, TeamTopic/5
-MainTopic = "TeamTopic/"
+MainTopic = "HEHE/"
 
 # Start the client to enable the above events to happen
 client.loop_start()

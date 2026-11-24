@@ -16,10 +16,10 @@ logging.basicConfig(level=logging.INFO)
 
 # First we need to set the IP and PORT we are going to listen to
 # "0.0.0.0" means listen on all network interfaces of this machine (USB, WiFi, etc.)
-UDP_IP = "0.0.0.0"
+UDP_IP = " 169.254.153.203"
  
 # This is the LOCAL port I am expecting data (on the sending machine this is the REMOTE port)
-UDP_PORT = 50002
+UDP_PORT = 25000
 
 # Create the socket for the UDP communication
 sock = socket.socket(socket.AF_INET,    # Family of addresses, in this case IP (Internet Protocol) family 
