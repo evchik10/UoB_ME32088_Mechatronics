@@ -1,0 +1,61 @@
+
+import cv2
+from pathlib import Path
+
+# Folder to store calibration images
+image_folder = Path(__file__).resolve().parent / "workdir" / "images"
+image_folder.mkdir(parents=True, exist_ok=True)
+
+# Select USB camera
+cap = cv2.VideoCapture(1)
+
+if not cap.isOpened():
+    print("Cannot open camera. Try changing 1 to 0.")
+    raise SystemExit(1)
+
+# Start numbering after existing photos
+count = len(list(image_folder.glob("calibration_*.jpg")))
+
+print("Camera started!")
+print("Press S to save an image")
+print("Press Q to quit")
+
+try:
+    while True:
+        ret, frame = cap.read()
+
+        if not ret:
+            print("Failed to capture frame")
+            break
+
+        # Display live camera feed
+        cv2.imshow("USB Camera - Calibration", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+
+        # Save image when S is pressed
+        if key == ord('s'):
+            count += 1
+
+            filename = image_folder / f"calibration_{count:03d}.jpg"
+
+            cv2.imwrite(str(filename), frame)
+
+            print(f"Saved image {count}: {filename}")
+
+        # Quit when Q is pressed
+        elif key == ord('q'):
+            break
+
+finally:
+    cap.release()
+    cv2.destroyAllWindows()
+    print("Camera closed")
+
+
+from pathlib import Path
+import os
+
+folder = Path(__file__).resolve().parent / "workdir" / "images"
+print(folder)
+os.startfile(folder)

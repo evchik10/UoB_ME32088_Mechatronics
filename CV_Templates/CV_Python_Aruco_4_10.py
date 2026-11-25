@@ -15,13 +15,13 @@ import time # We will use this to ensure a steady processing rate
 
 logging.basicConfig(level=logging.INFO)
 
-# Load the camera calibration values
+# Load camera calibration values
 script_folder = Path(__file__).resolve().parent
-calibration_path = script_folder / "Sample_Calibration.npz"
+calibration_path = script_folder / "workdir" / "Calibration.npz"
 camera_calibration = np.load(calibration_path)
-CM=camera_calibration['CM'] #camera matrix
-dist_coef=camera_calibration['dist_coef']# distortion coefficients from the camera
-logging.info("Loaded camera calibration from Sample_Calibration.npz")
+CM = camera_calibration["CM"]
+dist_coef = camera_calibration["dist_coef"]
+logging.info("Loaded camera calibration from Calibration.npz")
 
 # Define the ArUco dictionary and parameters
 marker_size = 40 # the real size of the printed marker in mm
@@ -44,8 +44,14 @@ cv2.namedWindow("Gray", cv2.WINDOW_AUTOSIZE)
 # Position the windows next to each other
 cv2.moveWindow("Gray", 640, 100)
 cv2.moveWindow("Frame", 0, 100)
+
 # Start capturing video
-cap = cv2.VideoCapture(0)
+# Laptop camera
+# cap = cv2.VideoCapture(0)
+
+# USB camera
+cap = cv2.VideoCapture(1, cv2.CAP_MSMF)
+
 if not cap.isOpened():
     logging.error("Could not open camera 0")
     raise SystemExit(1)
