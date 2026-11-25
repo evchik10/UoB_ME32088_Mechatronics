@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""
+Laser test client - run on your laptop.
+
+Connects to the TCP/IP server on the Raspberry Pi (port 25000) and turns the
+laser ON constantly. It stays on until you press Enter (or Ctrl+C),
+then the laser is switched OFF and the script exits.
+
+Protocol: 1 byte, 1 = ON, 0 = OFF  (Simulink TCP/IP block: uint8, Data size 1)
+
+Usage:
+    python laser_client.py 192.168.1.50
+"""
+import socket
+import struct
+import sys
+
+PORT = 25000
+
+
+def send(sock, value):
+    sock.sendall(struct.pack("B", value))
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+
+    host = sys.argv[1]
+    print(f"Connecting to {host}:{PORT} ...")
+    sock = socket.create_connection((host, PORT), timeout=5)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+    try:
+        send(sock, 1)
+        print("Laser ON. Press Enter to switch it off.")
+        input()
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        try:
+            send(sock, 0)
+        except OSError:
+            pass
+        sock.close()
+        print("Laser OFF, disconnected.")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,42 @@
+
+import socket
+import time
+
+# Raspberry Pi connection settings
+HOST = "138.38.228.70"  # Replace with Raspberry Pi IP
+PORT = 25000
+
+try:
+    with socket.create_connection((HOST, PORT), timeout=5) as client:
+
+        print("Connected to Raspberry Pi / Simulink")
+
+        while True:
+            print("\nMotor Control")
+            print("1 - Start motor sequence")
+            print("0 - Stop motor")
+            print("q - Quit")
+
+            command = input("Enter command: ")
+
+            if command == "1":
+                client.sendall(bytes([1]))
+                print("Start command sent")
+
+            elif command == "0":
+                client.sendall(bytes([0]))
+                print("Stop command sent")
+
+            elif command.lower() == "q":
+                client.sendall(bytes([0]))
+                print("Stop command sent. Disconnecting...")
+                break
+
+            else:
+                print("Invalid command")
+
+except ConnectionRefusedError:
+    print("Connection refused. Check Simulink is running.")
+
+except OSError as e:
+    print("Connection error:", e)

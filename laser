@@ -1,0 +1,27 @@
+from gpiozero import DigitalOutputDevice
+
+LASER_PIN = 18
+laser = DigitalOutputDevice(LASER_PIN, active_high=True, initial_value=False)
+
+print("Laser control  |  1 = ON   0 = OFF   t = toggle   p = 0.5 s pulse   q = quit")
+
+try:
+    while True:
+        cmd = input("> ").strip().lower()
+        if cmd == "1":
+            laser.on()
+        elif cmd == "0":
+            laser.off()
+        elif cmd == "t":
+            laser.toggle()
+        elif cmd == "p":
+            laser.blink(on_time=0.5, off_time=0, n=1, background=False)
+        elif cmd == "q":
+            break
+        else:
+            print("Unknown command")
+            continue
+        print("Laser is", "ON" if laser.value else "OFF")
+finally:
+    laser.off()      # always leave it OFF, even after Ctrl+C or a crash
+    laser.close()

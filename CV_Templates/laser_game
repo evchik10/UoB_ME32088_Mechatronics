@@ -1,0 +1,313 @@
+"""
+Laser game - camera + motor control in one script.
+
+The gantry sweeps along 6 shuffled cards (ArUco IDs 0, 1, 1, 2, 3, 4).
+When a card with TARGET_ID (1) passes under the camera, this script tells
+Simulink to stop the motor and fire the laser. After both ID-1 cards are
+shot it reports "done"; the Simulink chart finishes the sweep and returns.
+
+Commands sent to the Simulink TCP/IP Server block (1 byte each):
+    1 = start sweep      0 = stop motor      2 = target under camera -> shoot
+    3 = all targets shot -> return to origin (where the sweep started)
+
+Based on the course ArUco template (calibration + solvePnP) and the motor
+control TCP client. Requires OpenCV 4.7+ (ArucoDetector).
+
+Fully automatic: as soon as it connects it starts the sweep, shoots on its own,
+and sends the gantry back to its origin and exits once both targets have been shot.
+A shot only counts if the gantry really stopped (the card stays still in the
+image). If the chart ignored the command - e.g. it was moving Backward - the
+card keeps moving, the shot is not counted and the card is tried again later.
+The motor is stopped when an ID-1 card's centre reaches the camera centre
+(predicted ahead by LATENCY_S so it stops ON the centre, not after it), the
+laser fires for 2 s, then the sweep continues to the next ID-1 card.
+Keys (click the "Frame" window first!):
+    f = fire now (test the laser),  x = stop motor,  s = restart,  q = quit
+"""
+from pathlib import Path
+import logging
+import socket
+import time
+
+import cv2
+import cv2.aruco as aruco
+import numpy as np
+
+logging.basicConfig(level=logging.INFO)
+
+# ---------------- Settings (adjust these) ----------------
+HOST = "138.38.228.70"     # Raspberry Pi IP (where the Simulink model runs)
+PORT = 25000               # TCP/IP Server block port
+
+CAMERA_INDEX = 1           # USB camera (template used 1 with MSMF on Windows)
+CAMERA_API = cv2.CAP_MSMF  # on the Pi/Linux use cv2.CAP_V4L2
+
+MARKER_SIZE = 80           # real size of the printed black square [mm] (A3 sheet = 80)
+TARGET_ID = 1              # the two matching cards
+N_TARGETS = 2
+
+AXIS = 0                   # tvec axis along the gantry: 0 = camera x, 1 = camera y
+TRIGGER_MM = 0.0           # where the card centre should stop, measured from the camera centre.
+                           # 0 = card centred under the camera. If the laser dot is not at the
+                           # camera centre, set this to the dot's position (e.g. -12.0).
+LATENCY_S = 0.15           # time from "card seen" to "motor stopped" (camera + network + Simulink).
+                           # The script fires this much EARLY, using the card's measured speed.
+                           # Card stops past the centre -> increase; stops short -> decrease.
+FIRE_S = 2.5               # Shoot state in Simulink lasts 2 s; +0.5 s margin before moving on
+CONFIRM_S = 0.6            # after sending "shoot", watch this long to check the gantry really stopped
+STILL_MM = 3.0             # card moved less than this over the last frames = gantry stopped = shot
+MAX_JUMP_MM = 30.0         # bigger jump between frames = a different card (don't use for speed)
+MIN_SPEED = 5.0            # mm/s - below this the gantry is standing still, don't fire
+
+PROCESSING_PERIOD = 0.1    # seconds per frame (0.1 = 10 fps). Shorter = more accurate stopping:
+                           # the carriage moves speed*period between frames
+
+START_REPEAT_S = 1.0       # re-send "start" every second until both targets are shot.
+                           # Harmless while moving (Forward/Backward ignore cmd 1), and it
+                           # makes sure a start that arrived while the end switch was
+                           # pressed (scope == 0) is not lost.
+
+CMD_STOP, CMD_START, CMD_SHOOT, CMD_HOME = 0, 1, 2, 3
+
+
+# ---------------- Camera calibration and ArUco setup (from the template) ----------------
+script_folder = Path(__file__).resolve().parent
+camera_calibration = np.load(script_folder / "workdir" / "Calibration.npz")
+CM = camera_calibration["CM"]
+dist_coef = camera_calibration["dist_coef"]
+logging.info("Loaded camera calibration from Calibration.npz")
+
+aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
+parameters = aruco.DetectorParameters()
+detector = aruco.ArucoDetector(aruco_dict, parameters)
+
+# 3D corners of a marker (mm), origin in the centre; same order as the detector returns
+half = MARKER_SIZE / 2
+marker_points = np.array([[-half, half, 0], [half, half, 0], [half, -half, 0], [-half, -half, 0]],
+                         dtype=np.float32)
+
+
+def target_positions(corners, ids):
+    """Return the position along the gantry [mm] of every TARGET_ID marker in view."""
+    positions = []
+    if ids is None or len(corners) == 0:       # nothing detected
+        return positions
+    for i, marker_id in enumerate(ids.flatten()):
+        if int(marker_id) != TARGET_ID:
+            continue                           # random card - ignore it
+        ok, rvec, tvec = cv2.solvePnP(marker_points, corners[i], CM, dist_coef,
+                                      flags=cv2.SOLVEPNP_IPPE_SQUARE)
+        if ok:
+            positions.append(float(tvec[AXIS][0]))
+    return positions
+
+
+class Trigger:
+    """Decides when to shoot, and checks the shot really happened.
+       ARMED      -> follow the ID-1 card nearest the centre and measure its speed.
+                     Predict where it will be LATENCY_S from now; when that prediction
+                     crosses TRIGGER_MM, send "shoot" so the motor stops with the card centred.
+       CONFIRM    -> watch the card for CONFIRM_S. Still = gantry stopped = shot counted.
+                     Still moving = chart ignored the command (e.g. it was moving Backward).
+       FIRING     -> laser on in Simulink (2 s); wait FIRE_S before arming again
+       ARMED again: the card that was just shot is already past the centre, so it can
+                     never trigger twice; the next ID-1 card will."""
+
+    def __init__(self):
+        self.state = "ARMED"
+        self.shots = 0
+        self.t0 = 0.0
+        self.x0 = 0.0
+        self.track = []                        # card positions seen during CONFIRM
+        self.prev_x = None                     # last position of the followed card
+        self.prev_t = None
+        self.forward_dir = 0                   # +1/-1: direction cards move in the image during
+                                               # Forward (learnt from the first confirmed shot)
+        self.latency = LATENCY_S               # self-correcting: updated after every shot
+
+    @staticmethod
+    def _nearest(positions, x_ref):
+        return min(positions, key=lambda x: abs(x - x_ref)) if positions else None
+
+    def update(self, positions, now):
+        """Returns True when a "shoot" command should be sent."""
+        if self.state == "ARMED":
+            x = self._nearest(positions, TRIGGER_MM)
+            fire = False
+            if x is not None and self.prev_x is not None and abs(x - self.prev_x) < MAX_JUMP_MM:
+                dt = max(now - self.prev_t, 1e-3)
+                v = (x - self.prev_x) / dt                     # card speed in the image [mm/s]
+                d = 1 if v > 0 else -1                         # which way it is moving
+                # where the card will be when the motor has stopped; + half a frame because
+                # we can only decide once per frame (pick the frame closest to the centre)
+                predicted = x + v * (self.latency + PROCESSING_PERIOD / 2)
+                approaching = (TRIGGER_MM - self.prev_x) * d > 0   # was still before the centre
+                reached = (predicted - TRIGGER_MM) * d >= 0        # will be at/over the centre
+                right_way = self.forward_dir in (0, d)             # ignore Backward once learnt
+                fire = (abs(v) > MIN_SPEED and approaching and reached and right_way
+                        and self.shots < N_TARGETS)
+                if fire:
+                    self.move_dir, self.fire_speed = d, abs(v)
+            self.prev_x, self.prev_t = x, now
+            if fire:
+                self.x0, self.t0, self.track, self.state = x, now, [], "CONFIRM"
+                return True
+
+        elif self.state == "CONFIRM":
+            x = self._nearest(positions, self.x0)
+            if x is not None:
+                self.track.append(x)
+            if now - self.t0 >= CONFIRM_S:
+                last = self.track[-3:]
+                if len(last) >= 2 and max(last) - min(last) < STILL_MM:
+                    self.shots += 1
+                    self.forward_dir = self.move_dir       # this is the Forward direction
+                    self.state = "FIRING"
+                    # how far past (+) or short of (-) the centre did the card stop?
+                    overshoot = (last[-1] - TRIGGER_MM) * self.move_dir
+                    # correct the delay estimate so the next card stops closer to the centre
+                    self.latency = min(max(self.latency + 0.5 * overshoot / self.fire_speed, 0.0), 1.0)  # half-step: robust to noise
+                    logging.info("Shot %d of %d confirmed - stopped %.1f mm %s centre. "
+                                 "Delay estimate now %.2f s (put this in LATENCY_S)",
+                                 self.shots, N_TARGETS, abs(overshoot),
+                                 "past" if overshoot > 0 else "before", self.latency)
+                else:
+                    self._rearm()
+                    logging.warning("Shoot ignored by Simulink (gantry kept moving) - not counted")
+
+        elif self.state == "FIRING":
+            if now - self.t0 >= FIRE_S:
+                self._rearm()
+        return False
+
+    def _rearm(self):
+        self.state = "ARMED"
+        self.prev_x = self.prev_t = None           # start speed measurement afresh
+
+    @property
+    def finished(self):
+        return self.shots >= N_TARGETS and self.state != "FIRING"
+
+
+def send(client, cmd):
+    client.sendall(bytes([cmd]))               # one byte, like the motor control script
+    if cmd != CMD_START:                       # start is repeated every second - don't spam the log
+        logging.info("Sent command %d", cmd)
+
+
+def main():
+    # ---------------- Connect to Simulink ----------------
+    try:
+        client = socket.create_connection((HOST, PORT), timeout=5)
+    except OSError as e:
+        logging.error("Could not connect to %s:%d (%s). Is the Simulink model running?", HOST, PORT, e)
+        raise SystemExit(1)
+    logging.info("Connected to Raspberry Pi / Simulink")
+
+    # ---------------- Camera ----------------
+    cap = cv2.VideoCapture(CAMERA_INDEX, CAMERA_API)
+    if not cap.isOpened():
+        logging.error("Could not open camera %d", CAMERA_INDEX)
+        send(client, CMD_STOP)
+        raise SystemExit(1)
+    logging.info("Camera opened - starting automatically. Keys in Frame window: x stop, s restart, q quit")
+
+    trigger = Trigger()
+    homing = False                             # True once "return home" was sent
+    running = True                             # automatic start
+    send(client, CMD_START)
+    last_start = time.time()
+    last_seen = None
+    start_time = time.time()
+    fps = 0.0
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                logging.error("Could not read a frame; stopping")
+                break
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            corners, ids, _ = detector.detectMarkers(gray)
+            positions = target_positions(corners, ids)
+
+            # log what the camera sees whenever it changes (helps tuning TRIGGER_MM / LATENCY_S)
+            seen = tuple(sorted(int(i) for i in ids.flatten())) if ids is not None and len(corners) else ()
+            if seen != last_seen:
+                logging.info("Visible IDs: %s   ID1 positions: %s", seen or "none",
+                             ", ".join(f"{x:+.0f} mm" for x in positions) or "-")
+                last_seen = seen
+
+            # keep the sweep going until both targets are shot
+            now = time.time()
+            if running and trigger.shots < N_TARGETS and now - last_start >= START_REPEAT_S:
+                send(client, CMD_START)
+                last_start = now
+
+            # ---- shoot decision (only while the sweep is running) ----
+            if running and trigger.update(positions, time.time()):
+                send(client, CMD_SHOOT)
+                logging.info("ID1 card under camera - SHOOT")
+
+            # ---- all targets shot: send the gantry home and end the program ----
+            if running and trigger.finished:
+                for _ in range(3):             # send 3 times in case one arrives during a busy tick
+                    send(client, CMD_HOME)
+                    time.sleep(0.2)
+                homing = True
+                logging.info("All %d targets shot - returning to origin, program finished", N_TARGETS)
+                break
+
+            # ---- display ----
+            if len(corners) > 0:
+                aruco.drawDetectedMarkers(frame, corners, ids)
+            h, w = frame.shape[:2]
+            cv2.line(frame, (w // 2, 0), (w // 2, h), (0, 255, 0), 1)   # rough camera centre
+            status = "RUNNING (auto)" if running else "STOPPED (press s)"
+            cv2.putText(frame, f"{status}  shots {trigger.shots}/{N_TARGETS}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            if positions:
+                cv2.putText(frame, "ID1 at " + ", ".join(f"{x:+.0f}" for x in positions) + " mm",
+                            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            cv2.putText(frame, f"FPS {fps:.1f}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.imshow("Frame", frame)
+
+            # ---- keyboard ----
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("s"):
+                trigger = Trigger()            # new game: reset shot count
+                send(client, CMD_START)
+                last_start = time.time()
+                running = True
+                logging.info("Restarted")
+            elif key == ord("x"):
+                send(client, CMD_STOP)
+                running = False
+                logging.info("Stopped by user")
+            elif key == ord("f"):
+                send(client, CMD_SHOOT)        # manual test: laser should fire for the Shoot time
+                logging.info("Manual fire (test) - only works while the chart is in Forward")
+            elif key == ord("q"):
+                break
+
+            # ---- steady processing rate (as in the template) ----
+            elapsed = time.time() - start_time
+            if elapsed < PROCESSING_PERIOD:
+                time.sleep(PROCESSING_PERIOD - elapsed)
+            fps = 1.0 / max(time.time() - start_time, 1e-6)
+            start_time = time.time()
+    finally:
+        if not homing:                         # quit early / error: leave the motor stopped
+            try:                               # (after "home" we must NOT send stop, or the
+                send(client, CMD_STOP)         #  gantry would halt half-way back)
+            except OSError:
+                pass
+        client.close()
+        cap.release()
+        cv2.destroyAllWindows()
+        logging.info("Stopped")
+
+
+if __name__ == "__main__":
+    main()
